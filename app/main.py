@@ -1,15 +1,45 @@
 import os
 from typing import List, Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, BackgroundTasks, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.database import init_db, get_db_connection
 from app.scraper import sync_favorited_tweets
+from app.downloader import process_media_downloads
 
-app = FastAPI(title="X Archiver API")
+# 配置你想默认定时抓取的 X 账号
+TARGET_USERNAME = os.getenv("TARGET_USERNAME", "elonmusk") 
+
+scheduler = AsyncIOScheduler()
+
+# 将需要按顺序执行的任务封装起来
+async def scheduled_job():
+    print(f"开始执行定时抓取任务: {TARGET_USERNAME}")
+    await sync_favorited_tweets(TARGET_USERNAME)
+    print("抓取完成，开始处理未下载的媒体文件")
+    await process_media_downloads()
+
+# 使用最新的 lifespan 管理 FastAPI 生命周期
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时运行
+    init_db()
+    # 设置定时任务：例如每天凌晨 3:00 执行一次
+    scheduler.add_job(scheduled_job, 'cron', hour=3, minute=0)
+    scheduler.start()
+    print("定时任务调度器已启动")
+    
+    yield
+    
+    # 关闭时运行
+    scheduler.shutdown()
+
+app = FastAPI(title="X Archiver API", lifespan=lifespan)
 
 # 1. 挂载本地媒体目录为静态资源服务
 # 这样前端就能通过 /media/xxx/xxx.jpg 访问图片
