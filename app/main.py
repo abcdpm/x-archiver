@@ -2,6 +2,7 @@ import os
 from typing import List, Optional
 from fastapi import FastAPI, BackgroundTasks, Query
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -108,6 +109,19 @@ def get_tweets(
         "size": size,
         "data": result_data
     }
+
+# 挂载前端打包后的静态文件目录 (dist)
+frontend_dist = os.path.join(os.path.dirname(__dirname), "frontend", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    
+    # 捕获所有非 /api 的前端路由，返回 index.html 交给 Vue Router 处理（如果有的话）
+    @app.get("/{catchall:path}")
+    def serve_frontend(catchall: str):
+        index_path = os.path.join(frontend_dist, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        return {"error": "Frontend build not found"}
 
 # ==================== (保留之前的接口) ====================
 class SyncRequest(BaseModel):
