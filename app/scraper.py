@@ -2,6 +2,7 @@ import asyncio
 import logging
 from twscrape import API, gather
 from app.database import get_db_connection
+from app.downloader import process_media_downloads
 
 async def sync_favorited_tweets(username: str):
     """抓取指定用户的点赞推文并入库"""
@@ -58,4 +59,8 @@ async def sync_favorited_tweets(username: str):
     conn.close()
     
     logging.info(f"Sync complete! Added {added_count} new tweets.")
+    
+    # 抓取结束后，紧接着启动媒体下载任务
+    await process_media_downloads()
+    
     return {"status": "success", "new_tweets": added_count}
