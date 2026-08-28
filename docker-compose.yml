@@ -1,15 +1,37 @@
 services:
-  x-archiver:
-    build: .
-    container_name: x-archiver
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: x-archiver-backend
     restart: unless-stopped
     ports:
-      - "8080:8000" 
+      - "8000:8000"
     environment:
       - TZ=Asia/Shanghai
-      - TARGET_USERNAME=这里填你的X账号名
-      - MEDIA_DIR=/app/media
-      - DB_PATH=/app/database/archiver.sqlite
+      # 可以直接在这里指定，或者在根目录创建 .env 文件
+      - TARGET_USERNAME=elonmusk
     volumes:
+      # 持久化数据库 (包含 SQLite 和 twscrape 的 accounts.db)
       - /mnt/user/appdata/x-archiver/database:/app/database
+      # 持久化媒体文件
       - /mnt/user/appdata/x-archiver/media:/app/media
+    networks:
+      - x-archiver-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: x-archiver-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80" # 宿主机访问端口为 8080
+    depends_on:
+      - backend
+    networks:
+      - x-archiver-net
+
+networks:
+  x-archiver-net:
+    driver: bridge

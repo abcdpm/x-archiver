@@ -1,166 +1,37 @@
 import os
-from typing import List, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, Query
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.database import init_db, get_db_connection
-from app.scraper import sync_favorited_tweets
-from app.downloader import process_media_downloads
-
-# 配置你想默认定时抓取的 X 账号
-TARGET_USERNAME = os.getenv("TARGET_USERNAME", "elonmusk") 
+from app.core.config import settings
+from app.database import init_db
+from app.api.routers import router
+from app.services.scraper import sync_favorited_tweets
+from app.services.downloader import process_media_downloads
 
 scheduler = AsyncIOScheduler()
 
-# 将需要按顺序执行的任务封装起来
 async def scheduled_job():
-    print(f"开始执行定时抓取任务: {TARGET_USERNAME}")
-    await sync_favorited_tweets(TARGET_USERNAME)
-    print("抓取完成，开始处理未下载的媒体文件")
+    await sync_favorited_tweets(settings.TARGET_USERNAME)
     await process_media_downloads()
 
-# 使用最新的 lifespan 管理 FastAPI 生命周期
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时运行
+    # 1. 数据库初始化
     init_db()
-    # 设置定时任务：例如每天凌晨 3:00 执行一次
+    # 2. 定时调度器初始化 (每天凌晨3点执行)
     scheduler.add_job(scheduled_job, 'cron', hour=3, minute=0)
     scheduler.start()
-    print("定时任务调度器已启动")
-    
     yield
-    
-    # 关闭时运行
+    # 3. 优雅关闭
     scheduler.shutdown()
 
 app = FastAPI(title="X Archiver API", lifespan=lifespan)
 
-# 1. 挂载本地媒体目录为静态资源服务
-# 这样前端就能通过 /media/xxx/xxx.jpg 访问图片
-MEDIA_DIR = os.getenv("MEDIA_DIR", "./media")
-os.makedirs(MEDIA_DIR, exist_ok=True)
-app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
+# 注册 API 路由分发
+app.include_router(router, prefix="/api")
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
-
-# ==================== Pydantic 响应模型 ====================
-class MediaItem(BaseModel):
-    id: int
-    media_type: str
-    original_url: str
-    local_path: Optional[str] = None
-    download_status: int
-
-class TweetItem(BaseModel):
-    tweet_id: str
-    author_name: str
-    author_handle: str
-    author_avatar: Optional[str] = None
-    content: Optional[str] = None
-    post_type: str
-    original_url: str
-    posted_at: str
-    archived_at: str
-    media: List[MediaItem] = []
-
-class PaginatedTweets(BaseModel):
-    total: int
-    page: int
-    size: int
-    data: List[TweetItem]
-
-# ==================== 前端查询 API ====================
-
-@app.get("/api/tweets", response_model=PaginatedTweets)
-def get_tweets(
-    page: int = Query(1, ge=1, description="页码"),
-    size: int = Query(20, ge=1, le=100, description="每页数量")
-):
-    """
-    获取分页的推文列表，用于前端瀑布流展示
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # 1. 获取推文总数 (用于前端分页组件或判断是否加载到底)
-    cursor.execute("SELECT COUNT(*) as total FROM tweets")
-    total = cursor.fetchone()['total']
-    
-    # 2. 分页获取推文主体
-    offset = (page - 1) * size
-    cursor.execute('''
-        SELECT * FROM tweets 
-        ORDER BY posted_at DESC 
-        LIMIT ? OFFSET ?
-    ''', (size, offset))
-    tweets_rows = cursor.fetchall()
-    
-    if not tweets_rows:
-        conn.close()
-        return {"total": total, "page": page, "size": size, "data": []}
-        
-    # 3. 提取这一页的推文 ID，去查询对应的媒体文件 (避免 N+1 查询问题)
-    tweet_ids = [row['tweet_id'] for row in tweets_rows]
-    placeholders = ','.join(['?'] * len(tweet_ids))
-    
-    cursor.execute(f'''
-        SELECT * FROM media WHERE tweet_id IN ({placeholders})
-    ''', tweet_ids)
-    media_rows = cursor.fetchall()
-    conn.close()
-    
-    # 4. 将媒体文件按 tweet_id 分组
-    media_map = {}
-    for row in media_rows:
-        tid = row['tweet_id']
-        if tid not in media_map:
-            media_map[tid] = []
-        media_map[tid].append(dict(row))
-        
-    # 5. 拼装最终的嵌套 JSON 数据
-    result_data = []
-    for tweet in tweets_rows:
-        tweet_dict = dict(tweet)
-        # 将关联的媒体列表附加到推文对象中
-        tweet_dict['media'] = media_map.get(tweet['tweet_id'], [])
-        result_data.append(tweet_dict)
-        
-    return {
-        "total": total,
-        "page": page,
-        "size": size,
-        "data": result_data
-    }
-
-# 挂载前端打包后的静态文件目录 (dist)
-frontend_dist = os.path.join(os.path.dirname(__dirname), "frontend", "dist")
-if os.path.exists(frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
-    
-    # 捕获所有非 /api 的前端路由，返回 index.html 交给 Vue Router 处理（如果有的话）
-    @app.get("/{catchall:path}")
-    def serve_frontend(catchall: str):
-        index_path = os.path.join(frontend_dist, "index.html")
-        if os.path.exists(index_path):
-            return FileResponse(index_path)
-        return {"error": "Frontend build not found"}
-
-# ==================== (保留之前的接口) ====================
-class SyncRequest(BaseModel):
-    username: str
-
-@app.post("/api/sync")
-async def trigger_sync(request: SyncRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(sync_favorited_tweets, request.username)
-    return {"message": f"Background sync started for {request.username}"}
-
-if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+# 挂载本地媒体目录，供前端直接读取
+os.makedirs(settings.MEDIA_DIR, exist_ok=True)
+app.mount("/media", StaticFiles(directory=settings.MEDIA_DIR), name="media")
