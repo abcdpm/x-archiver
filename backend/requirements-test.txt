@@ -1,3 +1,4 @@
+# uv pip install -r requirements-test.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 pytest==8.0.0
 pytest-asyncio==0.23.5
 pytest-mock==3.12.0
